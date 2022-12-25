@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 import random
 
@@ -10,6 +10,7 @@ import torchvision.transforms as transforms
 import numpy as np
 import torch.backends.cudnn as cudnn
 import argparse
+from torch.nn import DataParallel
 
 from tqdm import tqdm
 from models.defineHourglass_512_gray_skip import HourglassNet
@@ -33,10 +34,10 @@ def parse_arguments():
         description='PyTorch Relight Model Training'
     )
 
-    parser.add_argument('--model-name', type=str, default='resnet50', help='model name')
+    parser.add_argument('--model-name', type=str, default='HourglassNet512', help='model name')
 
     # dataset
-    parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 128)')
+    parser.add_argument('--batch-size', type=int, default=128, metavar='N', help='input batch size for training (default: 128)')
 
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", type=str, help='divice')
     parser.add_argument('--epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
@@ -109,7 +110,9 @@ def main(args):
     test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
 
     # 定义模型
-    model = HourglassNet().to(args.device)
+    model = HourglassNet()
+    model = DataParallel(model)
+    model = model.to(args.device)
     # print(model)
 
     optimizor = torch.optim.Adam(model.parameters(), lr=args.lr)
