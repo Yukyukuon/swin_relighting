@@ -116,6 +116,7 @@ def main(args):
     # print(model)
 
     optimizor = torch.optim.Adam(model.parameters(), lr=args.lr)
+    lr_sheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizor, T_max=args.epochs, eta_min=1e-6)
     criterion = torch.nn.MSELoss().to(args.device)
 
     train_losses = []
@@ -143,6 +144,8 @@ def main(args):
 
         if bad_num > 10:
             break
+
+        lr_sheduler.step()
 
     loss_plot = {}
     loss_plot['train_loss'] = train_losses
