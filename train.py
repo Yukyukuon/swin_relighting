@@ -127,7 +127,7 @@ def main(args):
     for epoch in range(args.epochs):
         train_loss = train(model, train_loader, optimizor, criterion, args.device, args)
         val_loss = val(model, val_loader, criterion, args.device)
-        print('Epoch: %d, Train Loss: %.4f, Test Loss: %.4f' % (epoch, train_loss, val_loss))
+        print('Epoch: %d, Train Loss: %.4f, Val Loss: %.4f' % (epoch, train_loss, val_loss))
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
@@ -159,3 +159,5 @@ if __name__ == "__main__":
     if not os.path.exists(args.output_path):
         os.mkdir(args.output_path)
     main(args)
+
+    # nohup python -u train.py > hourglass-512.log 2>&1 &
