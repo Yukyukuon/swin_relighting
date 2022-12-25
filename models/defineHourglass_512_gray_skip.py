@@ -115,10 +115,15 @@ class lightingNet(nn.Module):
         self.post_FC1 = nn.Conv2d(self.ncOutput,  self.ncMiddle, kernel_size=1, stride=1, bias=False)
         self.post_relu1 = nn.PReLU()
         self.post_FC2 = nn.Conv2d(self.ncMiddle, self.ncInput, kernel_size=1, stride=1, bias=False)
-        self.post_relu2 = nn.ReLU()  # to be consistance with the original feature
+        self.post_relu2 = nn.PReLU()  # to be consistance with the original feature
 
     def forward(self, innerFeat, target_light, count, skip_count):
-        x = innerFeat[:,0:self.ncInput,:,:] # lighting feature
+
+        nc = innerFeat.shape[1]
+
+        x, other = torch.split(innerFeat, [self.ncInput, nc-self.ncInput], dim=1)
+
+        # x = innerFeat[:,0:self.ncInput,:,:] # lighting feature
         _, _, row, col = x.shape
 
         # predict lighting
@@ -130,8 +135,10 @@ class lightingNet(nn.Module):
         upFeat = self.post_relu1(self.post_FC1(target_light))
         upFeat = self.post_relu2(self.post_FC2(upFeat))
         upFeat = upFeat.repeat((1,1,row, col))
-        innerFeat[:,0:self.ncInput,:,:] = upFeat
-        return innerFeat, light
+
+        # innerFeat[:,0:self.ncInput,:,:] = upFeat
+        outFeat = torch.cat((upFeat, other), dim=1)
+        return outFeat, light
 
 
 class HourglassNet(nn.Module):
