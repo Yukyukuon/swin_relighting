@@ -1,26 +1,8 @@
-# --------------------------------------------------------
-# Swin Transformer
-# Copyright (c) 2021 Microsoft
-# Licensed under The MIT License [see LICENSE for details]
-# Written by Ze Liu
-# --------------------------------------------------------
-
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint
+from einops import rearrange
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-
-try:
-    import os, sys
-
-    kernel_path = os.path.abspath(os.path.join('..'))
-    sys.path.append(kernel_path)
-    from kernels.window_process.window_process import WindowProcess, WindowProcessReverse
-
-except:
-    WindowProcess = None
-    WindowProcessReverse = None
-    print("[Warning] Fused window process have not been installed. Please refer to get_started.md for installation.")
 
 
 class Mlp(nn.Module):
@@ -189,13 +171,11 @@ class SwinTransformerBlock(nn.Module):
         drop_path (float, optional): Stochastic depth rate. Default: 0.0
         act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
-        fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
     """
 
     def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 fused_window_process=False):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -243,7 +223,6 @@ class SwinTransformerBlock(nn.Module):
             attn_mask = None
 
         self.register_buffer("attn_mask", attn_mask)
-        self.fused_window_process = fused_window_process
 
     def forward(self, x):
         H, W = self.input_resolution
@@ -256,17 +235,12 @@ class SwinTransformerBlock(nn.Module):
 
         # cyclic shift
         if self.shift_size > 0:
-            if not self.fused_window_process:
-                shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
-                # partition windows
-                x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-            else:
-                x_windows = WindowProcess.apply(x, B, H, W, C, -self.shift_size, self.window_size)
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
-            # partition windows
-            x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
 
+        # partition windows
+        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
@@ -274,21 +248,17 @@ class SwinTransformerBlock(nn.Module):
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
 
         # reverse cyclic shift
         if self.shift_size > 0:
-            if not self.fused_window_process:
-                shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
-                x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
-            else:
-                x = WindowProcessReverse.apply(attn_windows, B, H, W, C, self.shift_size, self.window_size)
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
-            shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
             x = shifted_x
         x = x.view(B, H * W, C)
-        x = shortcut + self.drop_path(x)
 
         # FFN
+        x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
 
         return x
@@ -360,6 +330,55 @@ class PatchMerging(nn.Module):
         flops += (H // 2) * (W // 2) * 4 * self.dim * 2 * self.dim
         return flops
 
+class PatchExpand(nn.Module):
+    def __init__(self, input_resolution, dim, dim_scale=2, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.expand = nn.Linear(dim, 2*dim, bias=False) if dim_scale==2 else nn.Identity()
+        self.norm = norm_layer(dim // dim_scale)
+
+    def forward(self, x):
+        """
+        x: B, H*W, C
+        """
+        H, W = self.input_resolution
+        x = self.expand(x)
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+
+        x = x.view(B, H, W, C)
+        x = rearrange(x, 'b h w (p1 p2 c)-> b (h p1) (w p2) c', p1=2, p2=2, c=C//4)
+        x = x.view(B,-1,C//4)
+        x= self.norm(x)
+
+        return x
+
+class FinalPatchExpand_X4(nn.Module):
+    def __init__(self, input_resolution, dim, dim_scale=4, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.dim_scale = dim_scale
+        self.expand = nn.Linear(dim, 16*dim, bias=False)
+        self.output_dim = dim 
+        self.norm = norm_layer(self.output_dim)
+
+    def forward(self, x):
+        """
+        x: B, H*W, C
+        """
+        H, W = self.input_resolution
+        x = self.expand(x)
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+
+        x = x.view(B, H, W, C)
+        x = rearrange(x, 'b h w (p1 p2 c)-> b (h p1) (w p2) c', p1=self.dim_scale, p2=self.dim_scale, c=C//(self.dim_scale**2))
+        x = x.view(B,-1,self.output_dim)
+        x= self.norm(x)
+
+        return x
 
 class BasicLayer(nn.Module):
     """ A basic Swin Transformer layer for one stage.
@@ -379,13 +398,11 @@ class BasicLayer(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
-        fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
-                 fused_window_process=False):
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
 
         super().__init__()
         self.dim = dim
@@ -402,8 +419,7 @@ class BasicLayer(nn.Module):
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                 norm_layer=norm_layer,
-                                 fused_window_process=fused_window_process)
+                                 norm_layer=norm_layer)
             for i in range(depth)])
 
         # patch merging layer
@@ -433,6 +449,63 @@ class BasicLayer(nn.Module):
             flops += self.downsample.flops()
         return flops
 
+class BasicLayer_up(nn.Module):
+    """ A basic Swin Transformer layer for one stage.
+
+    Args:
+        dim (int): Number of input channels.
+        input_resolution (tuple[int]): Input resolution.
+        depth (int): Number of blocks.
+        num_heads (int): Number of attention heads.
+        window_size (int): Local window size.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set.
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float | tuple[float], optional): Stochastic depth rate. Default: 0.0
+        norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
+        downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
+    """
+
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size,
+                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., norm_layer=nn.LayerNorm, upsample=None, use_checkpoint=False):
+
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.depth = depth
+        self.use_checkpoint = use_checkpoint
+
+        # build blocks
+        self.blocks = nn.ModuleList([
+            SwinTransformerBlock(dim=dim, input_resolution=input_resolution,
+                                 num_heads=num_heads, window_size=window_size,
+                                 shift_size=0 if (i % 2 == 0) else window_size // 2,
+                                 mlp_ratio=mlp_ratio,
+                                 qkv_bias=qkv_bias, qk_scale=qk_scale,
+                                 drop=drop, attn_drop=attn_drop,
+                                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                                 norm_layer=norm_layer)
+            for i in range(depth)])
+
+        # patch merging layer
+        if upsample is not None:
+            self.upsample = PatchExpand(input_resolution, dim=dim, dim_scale=2, norm_layer=norm_layer)
+        else:
+            self.upsample = None
+
+    def forward(self, x):
+        for blk in self.blocks:
+            if self.use_checkpoint:
+                x = checkpoint.checkpoint(blk, x)
+            else:
+                x = blk(x)
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x
 
 class PatchEmbed(nn.Module):
     r""" Image to Patch Embedding
@@ -481,8 +554,47 @@ class PatchEmbed(nn.Module):
             flops += Ho * Wo * self.embed_dim
         return flops
 
+class lightingNet(nn.Module):
+    '''
+        define lighting network
+    '''
+    def __init__(self, ncInput, ncOutput, ncMiddle):
+        super(lightingNet, self).__init__()
+        self.ncInput = ncInput
+        self.ncOutput = ncOutput
+        self.ncMiddle = ncMiddle
 
-class SwinTransformer(nn.Module):
+        self.predict_FC1 = nn.Conv1d(self.ncInput,  self.ncMiddle, kernel_size=1, stride=1, bias=False)
+        self.predict_relu1 = nn.PReLU()
+        self.predict_FC2 = nn.Conv1d(self.ncMiddle, self.ncOutput, kernel_size=1, stride=1, bias=False)
+
+        self.post_FC1 = nn.Conv1d(self.ncOutput,  self.ncMiddle, kernel_size=1, stride=1, bias=False)
+        self.post_relu1 = nn.PReLU()
+        self.post_FC2 = nn.Conv1d(self.ncMiddle, self.ncInput, kernel_size=1, stride=1, bias=False)
+        self.post_relu2 = nn.ReLU()  # to be consistance with the original feature
+
+    def forward(self, innerFeat, target_light):
+        nc = innerFeat.shape[2]
+        x, other = torch.split(innerFeat, [self.ncInput, nc-self.ncInput], dim=2)
+
+        _, L, _ = x.shape
+
+        # predict lighting
+        feat = x.mean(dim=(1), keepdim=True)
+        feat = feat.permute(0, 2, 1).contiguous()
+        light = self.predict_relu1(self.predict_FC1(feat))
+        light = self.predict_FC2(light)
+
+        # get back the feature space
+        upFeat = self.post_relu1(self.post_FC1(target_light))
+        upFeat = self.post_relu2(self.post_FC2(upFeat))
+        upFeat = upFeat.repeat((1,1, L)).permute(0, 2, 1).contiguous()
+        # innerFeat[:,0:self.ncInput,:,:] = upFeat
+        outFeat = torch.cat((upFeat, other), dim=2)
+        return outFeat, light
+
+
+class SwinTransformerUnet(nn.Module):
     r""" Swin Transformer
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
@@ -490,8 +602,9 @@ class SwinTransformer(nn.Module):
     Args:
         img_size (int | tuple(int)): Input image size. Default 224
         patch_size (int | tuple(int)): Patch size. Default: 4
-        in_chans (int): Number of input image channels. Default: 3
-        num_classes (int): Number of classes for classification head. Default: 1000
+        in_chans (int): Number of input image channels. Default: 1
+        out_chans (int): Number of output image channels. Default: 1
+        out
         embed_dim (int): Patch embedding dimension. Default: 96
         depths (tuple(int)): Depth of each Swin Transformer layer.
         num_heads (tuple(int)): Number of attention heads in different layers.
@@ -506,24 +619,28 @@ class SwinTransformer(nn.Module):
         ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
         patch_norm (bool): If True, add normalization after patch embedding. Default: True
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
-        fused_window_process (bool, optional): If True, use one kernel to fused window shift & window partition for acceleration, similar for the reversed part. Default: False
     """
 
-    def __init__(self, img_size=224, patch_size=4, in_chans=3, num_classes=1000,
-                 embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
-                 window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
+    def __init__(self, img_size=512, patch_size=4, in_chans=1, out_chans=1,
+                 embed_dim=96, depths=[2, 2, 2, 2], depths_decoder=[1, 2, 2, 2], num_heads=[3, 6, 12, 24],
+                 window_size=8, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
-                 use_checkpoint=False, fused_window_process=False, **kwargs):
+                 use_checkpoint=False, final_upsample="expand_first", **kwargs):
         super().__init__()
 
-        self.num_classes = num_classes
+        print("SwinTransformerSys expand initial----depths:{};depths_decoder:{};drop_path_rate:{};out_chans:{}".format(depths,
+        depths_decoder,drop_path_rate,out_chans))
+
+        self.out_chans = out_chans
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+        self.num_features_up = int(embed_dim * 2)
         self.mlp_ratio = mlp_ratio
+        self.final_upsample = final_upsample
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -543,7 +660,7 @@ class SwinTransformer(nn.Module):
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
 
-        # build layers
+        # build encoder and bottleneck layers
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
@@ -558,13 +675,44 @@ class SwinTransformer(nn.Module):
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                               use_checkpoint=use_checkpoint,
-                               fused_window_process=fused_window_process)
+                               use_checkpoint=use_checkpoint)
             self.layers.append(layer)
+        
+        # build decoder layers
+        self.layers_up = nn.ModuleList()
+        self.concat_back_dim = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            concat_linear = nn.Linear(2*int(embed_dim*2**(self.num_layers-1-i_layer)),
+            int(embed_dim*2**(self.num_layers-1-i_layer))) if i_layer > 0 else nn.Identity()
+            if i_layer ==0 :
+                layer_up = PatchExpand(input_resolution=(patches_resolution[0] // (2 ** (self.num_layers-1-i_layer)),
+                patches_resolution[1] // (2 ** (self.num_layers-1-i_layer))), dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)), dim_scale=2, norm_layer=norm_layer)
+            else:
+                layer_up = BasicLayer_up(dim=int(embed_dim * 2 ** (self.num_layers-1-i_layer)),
+                                input_resolution=(patches_resolution[0] // (2 ** (self.num_layers-1-i_layer)),
+                                                    patches_resolution[1] // (2 ** (self.num_layers-1-i_layer))),
+                                depth=depths[(self.num_layers-1-i_layer)],
+                                num_heads=num_heads[(self.num_layers-1-i_layer)],
+                                window_size=window_size,
+                                mlp_ratio=self.mlp_ratio,
+                                qkv_bias=qkv_bias, qk_scale=qk_scale,
+                                drop=drop_rate, attn_drop=attn_drop_rate,
+                                drop_path=dpr[sum(depths[:(self.num_layers-1-i_layer)]):sum(depths[:(self.num_layers-1-i_layer) + 1])],
+                                norm_layer=norm_layer,
+                                upsample=PatchExpand if (i_layer < self.num_layers - 1) else None,
+                                use_checkpoint=use_checkpoint)
+            self.layers_up.append(layer_up)
+            self.concat_back_dim.append(concat_linear)
 
         self.norm = norm_layer(self.num_features)
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.norm_up= norm_layer(self.embed_dim)
+
+        self.light = lightingNet(27, 9, 128)
+
+        if self.final_upsample == "expand_first":
+            print("---final upsample expand_first---")
+            self.up = FinalPatchExpand_X4(input_resolution=(img_size//patch_size,img_size//patch_size),dim_scale=4,dim=embed_dim)
+            self.output = nn.Conv2d(in_channels=embed_dim,out_channels=self.out_chans,kernel_size=1,bias=False)
 
         self.apply(self._init_weights)
 
@@ -585,24 +733,62 @@ class SwinTransformer(nn.Module):
     def no_weight_decay_keywords(self):
         return {'relative_position_bias_table'}
 
+    #Encoder and Bottleneck
     def forward_features(self, x):
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
+        x_downsample = []
 
         for layer in self.layers:
+            print(x.shape)
+            x_downsample.append(x)
             x = layer(x)
 
         x = self.norm(x)  # B L C
-        x = self.avgpool(x.transpose(1, 2))  # B C 1
-        x = torch.flatten(x, 1)
+  
+        return x, x_downsample
+
+    #Dencoder and Skip connection
+    def forward_up_features(self, x, x_downsample, target_light):
+        out_lights = []
+        for inx, layer_up in enumerate(self.layers_up):
+            if inx == 0:
+                x, out_light = self.light(x, target_light)
+                out_lights.append(out_light)
+                x = layer_up(x)
+            else:
+                out_feat, out_light = self.light(x_downsample[3-inx], target_light)
+                out_lights.append(out_light)
+                x = torch.cat([x, out_feat],-1)
+                x = self.concat_back_dim[inx](x)
+                x = layer_up(x)
+
+        x = self.norm_up(x)  # B L C
+        out_lights = torch.cat(out_lights, dim=1)
+  
+        return x, out_lights
+
+    def up_x4(self, x):
+        H, W = self.patches_resolution
+        B, L, C = x.shape
+        assert L == H*W, "input features has wrong size"
+
+        if self.final_upsample=="expand_first":
+            x = self.up(x)
+            x = x.view(B,4*H,4*W,-1)
+            x = x.permute(0,3,1,2) #B,C,H,W
+            x = self.output(x)
+            
         return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
+    def forward(self, x, target_light):
+        x, x_downsample = self.forward_features(x)
+        x, out_lights = self.forward_up_features(x,x_downsample, target_light)
+        x = self.up_x4(x)
+
+        return x, out_lights
 
     def flops(self):
         flops = 0
@@ -610,5 +796,17 @@ class SwinTransformer(nn.Module):
         for i, layer in enumerate(self.layers):
             flops += layer.flops()
         flops += self.num_features * self.patches_resolution[0] * self.patches_resolution[1] // (2 ** self.num_layers)
-        flops += self.num_features * self.num_classes
+        flops += self.num_features * self.out_chans
         return flops
+
+if __name__ == '__main__':
+    model = SwinTransformerUnet(img_size=512, patch_size=4, in_chans=1, out_chans=1, embed_dim=96)
+    model.eval()
+    x = torch.randn(1, 1, 512, 512)
+    light = torch.randn(1, 9, 1)
+    y, outlights = model(x, light)
+    print(y.shape, outlights.shape)
+    outlights = outlights.squeeze(-1)
+    light_pred_1, light_pred_2, light_pred_3, light_pred_4 = outlights.split(9, dim=1)
+    print(light_pred_1.shape, light_pred_2.shape, light_pred_3.shape, light_pred_4.shape)
+    print(model.flops())
