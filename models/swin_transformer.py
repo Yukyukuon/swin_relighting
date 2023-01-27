@@ -742,7 +742,7 @@ class SwinTransformerUnet(nn.Module):
         x_downsample = []
 
         for layer in self.layers:
-            print(x.shape)
+            # print(x.shape)
             x_downsample.append(x)
             x = layer(x)
 

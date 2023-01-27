@@ -3,4 +3,6 @@
 log_test/
 result_1024
 data/DPR_dataset/*
-
+output/*
+result/*
+*.log

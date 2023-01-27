@@ -34,10 +34,10 @@ def parse_arguments():
         description='PyTorch Relight Model Training'
     )
 
-    parser.add_argument('--model-name', type=str, default='HourglassNet512', help='model name')
+    parser.add_argument('--model-name', type=str, default='SwinTransformer', help='model name')
 
     # dataset
-    parser.add_argument('--batch-size', type=int, default=128, metavar='N', help='input batch size for training (default: 128)')
+    parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 128)')
 
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", type=str, help='divice')
     parser.add_argument('--epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
@@ -84,7 +84,7 @@ def train(model, data_loader, optimizer, criterion, device, args):
         light_target = light_target.to(device).squeeze(-1)
 
         optimizer.zero_grad()
-        img_pred, light_pred = model(img_input, light_target, 0)
+        img_pred, light_pred = model(img_input, light_target)
         img_loss = criterion(img_pred, img_target)
         light_pred_1, light_pred_2, light_pred_3, light_pred_4 = light_pred.split(9, dim=1)
         light_loss_1 = criterion(light_pred_1, light_input)
@@ -168,4 +168,4 @@ if __name__ == "__main__":
         os.mkdir(args.output_path)
     main(args)
 
-    # nohup python -u train.py > hourglass-512.log 2>&1 &
+    # nohup python -u train_swin.py > swintrans.log 2>&1 &
