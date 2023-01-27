@@ -37,7 +37,7 @@ def parse_arguments():
     parser.add_argument('--model-name', type=str, default='SwinTransformer', help='model name')
 
     # dataset
-    parser.add_argument('--batch-size', type=int, default=32, metavar='N', help='input batch size for training (default: 128)')
+    parser.add_argument('--batch-size', type=int, default=48, metavar='N', help='input batch size for training (default: 128)')
 
     parser.add_argument('--device', default="cuda" if torch.cuda.is_available() else "cpu", type=str, help='divice')
     parser.add_argument('--epochs', type=int, default=10, metavar='N', help='number of epochs to train (default: 10)')
@@ -58,7 +58,7 @@ def val(model, data_loader, criterion, device):
             img_target = img_target.to(device)
             light_target = light_target.to(device).squeeze(-1)
 
-            img_pred, light_pred = model(img_input, light_target, 0)
+            img_pred, light_pred = model(img_input, light_target)
             img_loss = criterion(img_pred, img_target)
             light_pred_1, light_pred_2, light_pred_3, light_pred_4 = light_pred.split(9, dim=1)
             light_loss_1 = criterion(light_pred_1, light_input)
@@ -113,8 +113,8 @@ def main(args):
     train_data = RelightDataset('data/train.lst', 'data/DPR_dataset', transform)
     val_data = RelightDataset('data/val.lst', 'data/DPR_dataset', transform)
     test_data = RelightDataset('data/test.lst', 'data/DPR_dataset', transform)
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=8)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size, shuffle=True, num_workers=8)
     test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.batch_size, shuffle=True)
 
     # 定义模型
