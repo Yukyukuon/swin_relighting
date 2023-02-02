@@ -82,6 +82,7 @@ def train(model, data_loader, optimizer, criterion, device, args):
         light_input = light_input.to(device).squeeze(-1)
         img_target = img_target.to(device)
         light_target = light_target.to(device).squeeze(-1)
+        print(img_input.shape, light_input.shape, img_target.shape, light_target.shape)
 
         optimizer.zero_grad()
         img_pred, light_pred = model(img_input, light_target)
@@ -111,6 +112,7 @@ def main(args):
     ])
 
     train_data = RelightDataset('data/train.lst', 'data/DPR_dataset', transform)
+    print(len(train_data))
     val_data = RelightDataset('data/val.lst', 'data/DPR_dataset', transform)
     test_data = RelightDataset('data/test.lst', 'data/DPR_dataset', transform)
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=8)

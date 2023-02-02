@@ -4,5 +4,6 @@ log_test/
 result_1024
 data/DPR_dataset/*
 output/*
-result/*
+result_HG/*
+result_Swin/*
 *.log

@@ -11,7 +11,7 @@ import argparse
 import cv2
 from torch.autograd import Variable
 
-from models.defineHourglass_512_gray_skip import HourglassNet
+from models.swin_transformer import SwinTransformerUnet
 from utils.utils_SH import *
 
 # ---------------- create normal for rendering half sphere ------
@@ -39,9 +39,9 @@ def strip_prefix(state_dict, prefix='module.'):
     return stripped_state_dict
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ckpt_path = 'output/HourglassNet512_best_model.pth'
+ckpt_path = 'output/SwinTransformer_best_model.pth'
 
-model = HourglassNet().to(device)
+model = SwinTransformerUnet().to(device)
 model.load_state_dict(strip_prefix(torch.load(ckpt_path)))
 model.eval()
 
@@ -49,7 +49,7 @@ criterion = torch.nn.MSELoss().to(device)
 
 test_data_path = 'data/test_dataset'
 hq_path = 'data/DPR_dataset'
-saveFolder = 'result_HG'
+saveFolder = 'result_Swin'
 
 def read_original_img(path):
     img = cv2.imread(path)
@@ -95,9 +95,9 @@ for file in os.listdir(test_data_path):
 
         #----------------------------------------------
         #  rendering images using the network
-        sh = np.reshape(sh, (1,9,1,1)).astype(np.float32)
+        sh = np.reshape(sh, (1,9,1)).astype(np.float32)
         sh = Variable(torch.from_numpy(sh).cuda())
-        outputImg, outputSH  = model(inputL, sh, 0)
+        outputImg, outputSH  = model(inputL, sh)
         outputImg = outputImg[0].cpu().data.numpy()
         outputImg = outputImg.transpose((1,2,0))
         outputImg = np.squeeze(outputImg)

@@ -78,6 +78,7 @@ def train(model, data_loader, optimizer, criterion, device, args):
         light_input = light_input.to(device)
         img_target = img_target.to(device)
         light_target = light_target.to(device)
+        print(light_input.shape)
 
         optimizer.zero_grad()
         img_pred, light_pred = model(img_input, light_target, 0)
