@@ -51,6 +51,9 @@ test_data_path = 'data/test_dataset'
 hq_path = 'data/DPR_dataset'
 saveFolder = 'result_HG'
 
+if not os.path.exists(saveFolder):
+    os.makedirs(saveFolder)
+
 def read_original_img(path):
     img = cv2.imread(path)
     row, col, _ = img.shape

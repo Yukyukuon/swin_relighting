@@ -39,7 +39,7 @@ def strip_prefix(state_dict, prefix='module.'):
     return stripped_state_dict
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-ckpt_path = 'output/SwinTransformer_best_model.pth'
+ckpt_path = 'output/SwinTransformer_model_5.pth'
 
 model = SwinTransformerUnet().to(device)
 model.load_state_dict(strip_prefix(torch.load(ckpt_path)))
@@ -50,6 +50,9 @@ criterion = torch.nn.MSELoss().to(device)
 test_data_path = 'data/test_dataset'
 hq_path = 'data/DPR_dataset'
 saveFolder = 'result_Swin'
+
+if not os.path.exists(saveFolder):
+    os.makedirs(saveFolder)
 
 def read_original_img(path):
     img = cv2.imread(path)
